@@ -46,6 +46,13 @@ BAZEL_OPTIONS?=
 API_OPTIONS?=
 GCFLAGS?=
 
+OFFLINE_IMAGES?=${IMAGES}
+ifdef OFFLINE
+	OFFLINE_SFX:=-offline
+else
+	OFFLINE_SFX:=
+endif
+
 # See http://stackoverflow.com/questions/18136918/how-to-get-current-relative-directory-of-your-makefile
 MAKEDIR:=$(strip $(shell dirname "$(realpath $(lastword $(MAKEFILE_LIST)))"))
 
@@ -296,6 +303,7 @@ version-dist: nodeup-dist kops-dist protokube-export utils-dist
 	mkdir -p ${UPLOAD}/kops/${VERSION}/darwin/amd64/
 	mkdir -p ${UPLOAD}/kops/${VERSION}/images/
 	mkdir -p ${UPLOAD}/utils/${VERSION}/linux/amd64/
+	cp ${IMAGES}/images/offline* ${UPLOAD}/kops/${VERSION}/images/.
 	cp ${DIST}/nodeup ${UPLOAD}/kops/${VERSION}/linux/amd64/nodeup
 	cp ${DIST}/nodeup.sha1 ${UPLOAD}/kops/${VERSION}/linux/amd64/nodeup.sha1
 	cp ${IMAGES}/protokube.tar.gz ${UPLOAD}/kops/${VERSION}/images/protokube.tar.gz
@@ -393,9 +401,37 @@ ${PROTOKUBE}:
 .PHONY: protokube
 protokube: ${PROTOKUBE}
 
+.PHONY: offline
+offline: 
+	@echo "OFFLINE=$(OFFLINE)"; \
+    if [ "$(OFFLINE)" == "true" ] ; \
+    then \
+		imageid="`docker images -q offline-base:0.2 2> /dev/null`"; if [ -z "$$imageid" ]; then docker image load -i ${OFFLINE_IMAGES}/images/offline-base-0.2.tar.gz; else echo "image id $$imageid exists"; fi; \
+		imageid="`docker images -q offline-base:0.3 2> /dev/null`"; if [ -z "$$imageid" ]; then docker image load -i ${OFFLINE_IMAGES}/images/offline-base-0.3.tar.gz; else echo "image id $$imageid exists"; fi; \
+		imageid="`docker images -q offline-utils:0.2 2> /dev/null`"; if [ -z "$$imageid" ]; then docker image load -i ${OFFLINE_IMAGES}/images/offline-utils-0.2.tar.gz; else echo "image id $$imageid exists"; fi; \
+    fi;
+
+.PHONY: offline-build
+offline-build: 
+	docker build -t offline-base:0.2 --build-arg version=0.2 images/offline-base
+	docker build -t offline-base:0.3 --build-arg version=0.3 images/offline-base
+	docker build -t offline-utils:0.2 --build-arg version=0.2 images/offline-utils
+	mkdir -p ${IMAGES}/images
+	rm -rf ${IMAGES}/images/offline-*
+	docker image save offline-base:0.2 > ${IMAGES}/images/offline-base-0.2.tar
+	gzip --force --best ${IMAGES}/images/offline-base-0.2.tar
+	(${SHASUMCMD} ${IMAGES}/images/offline-base-0.2.tar.gz | cut -d' ' -f1) > ${IMAGES}/images/offline-base-0.2.tar.gz.sha1
+	docker image save offline-base:0.3 > ${IMAGES}/images/offline-base-0.3.tar
+	gzip --force --best ${IMAGES}/images/offline-base-0.3.tar
+	(${SHASUMCMD} ${IMAGES}/images/offline-base-0.3.tar.gz | cut -d' ' -f1) > ${IMAGES}/images/offline-base-0.3.tar.gz.sha1
+	docker image save offline-utils:0.2 > ${IMAGES}/images/offline-utils-0.2.tar
+	gzip --force --best ${IMAGES}/images/offline-utils-0.2.tar
+	(${SHASUMCMD} ${IMAGES}/images/offline-utils-0.2.tar.gz | cut -d' ' -f1) > ${IMAGES}/images/offline-utils-0.2.tar.gz.sha1
+
+
 .PHONY: protokube-builder-image
-protokube-builder-image:
-	docker build -t protokube-builder images/protokube-builder
+protokube-builder-image: offline
+	docker build -t protokube-builder images/protokube-builder${OFFLINE_SFX}
 
 .PHONY: protokube-build-in-docker
 protokube-build-in-docker: protokube-builder-image
@@ -403,8 +439,8 @@ protokube-build-in-docker: protokube-builder-image
 	docker run -t -e VERSION=${VERSION} -e HOST_UID=${UID} -e HOST_GID=${GID} -v `pwd`:/src protokube-builder /onbuild.sh
 
 .PHONY: protokube-image
-protokube-image: protokube-build-in-docker
-	docker build -t protokube:${PROTOKUBE_TAG} -f images/protokube/Dockerfile .
+protokube-image: offline protokube-build-in-docker
+	docker build -t protokube:${PROTOKUBE_TAG} -f images/protokube${OFFLINE_SFX}/Dockerfile .
 
 .PHONY: protokube-export
 protokube-export: protokube-image
@@ -442,15 +478,15 @@ dns-controller-gocode:
 
 .PHONY: dns-controller-builder-image
 dns-controller-builder-image:
-	docker build -t dns-controller-builder images/dns-controller-builder
+	docker build -t dns-controller-builder images/dns-controller-builder${OFFLINE_SFX}
 
 .PHONY: dns-controller-build-in-docker
 dns-controller-build-in-docker: dns-controller-builder-image
 	docker run -t -e HOST_UID=${UID} -e HOST_GID=${GID} -v `pwd`:/src dns-controller-builder /onbuild.sh
 
 .PHONY: dns-controller-image
-dns-controller-image: dns-controller-build-in-docker
-	docker build -t ${DOCKER_REGISTRY}/dns-controller:${DNS_CONTROLLER_TAG}  -f images/dns-controller/Dockerfile .
+dns-controller-image: offline dns-controller-build-in-docker
+	docker build -t ${DOCKER_REGISTRY}/dns-controller:${DNS_CONTROLLER_TAG}  -f images/dns-controller${OFFLINE_SFX}/Dockerfile .
 
 .PHONY: dns-controller-push
 dns-controller-push: dns-controller-image
@@ -460,8 +496,8 @@ dns-controller-push: dns-controller-image
 # static utils
 
 .PHONY: utils-dist
-utils-dist:
-	docker build -t utils-builder images/utils-builder
+utils-dist: offline
+	docker build -t utils-builder images/utils-builder${OFFLINE_SFX}
 	mkdir -p ${DIST}/linux/amd64/
 	docker run -v `pwd`/.build/dist/linux/amd64/:/dist utils-builder /extract.sh
 
@@ -641,12 +677,12 @@ kops-server-docker-compile:
 	GOOS=linux GOARCH=amd64 go build ${GCFLAGS} -a ${EXTRA_BUILDFLAGS} -o ${DIST}/linux/amd64/kops-server ${LDFLAGS}"${EXTRA_LDFLAGS} -X k8s.io/kops-server.Version=${VERSION} -X k8s.io/kops-server.GitVersion=${GITSHA}" k8s.io/kops/cmd/kops-server
 
 .PHONY: kops-server-build
-kops-server-build:
+kops-server-build: offline
 	# Compile the API binary in linux, and copy to local filesystem
 	docker pull golang:${GOVERSION}
 	docker run --name=kops-server-build-${UNIQUE} -e STATIC_BUILD=yes -e VERSION=${VERSION} -v ${GOPATH}/src:/go/src -v ${MAKEDIR}:/go/src/k8s.io/kops golang:${GOVERSION} make -C /go/src/k8s.io/kops/ kops-server-docker-compile
 	docker cp kops-server-build-${UNIQUE}:/go/src/k8s.io/kops/.build .
-	docker build -t ${DOCKER_REGISTRY}/kops-server:${KOPS_SERVER_TAG} -f images/kops-server/Dockerfile .
+	docker build -t ${DOCKER_REGISTRY}/kops-server:${KOPS_SERVER_TAG} -f images/kops-server${OFFLINE_SFX}/Dockerfile .
 
 .PHONY: kops-server-push
 kops-server-push: kops-server-build
